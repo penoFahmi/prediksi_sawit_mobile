@@ -17,7 +17,12 @@ class TFLiteService {
   Interpreter? _interpreter;
   bool _isModelLoaded = false;
 
-  final List<String> _labels = ['Mentah', 'Mengkal', 'Matang', 'Lewat Matang'];
+  // TensorFlow/Keras default class order is alphabetical based on folder names:
+  // 1. Lewat Matang
+  // 2. Matang
+  // 3. Mengkal
+  // 4. Mentah
+  final List<String> _labels = ['Lewat Matang', 'Matang', 'Mengkal', 'Mentah'];
 
   Future<void> loadModel() async {
     try {
@@ -54,9 +59,7 @@ class TFLiteService {
 
     // 3. Inference (if model loaded, else mock)
     if (!_isModelLoaded || _interpreter == null) {
-      // Mock result if model is missing (for UI testing)
-      await Future.delayed(const Duration(milliseconds: 300));
-      return _getRecommendation(_labels[2], 0.95); // Default to 'Matang' with 95% conf
+      throw Exception('Model AI gagal dimuat. Pastikan file model.tflite ada dan aplikasi telah di-restart sepenuhnya.');
     }
 
     // 4. Preprocess for MobileNetV2 (224x224, float32, normalized to [-1, 1] or [0, 1] depending on model)
@@ -72,6 +75,7 @@ class TFLiteService {
           224,
           (x) {
             final pixel = resizedImage.getPixel(x, y);
+            // Normalisasi [0.0 - 1.0] yang sering dipakai jika dilatih dengan rescale=1./255
             return [
               pixel.r / 255.0, // R
               pixel.g / 255.0, // G
