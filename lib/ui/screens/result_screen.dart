@@ -29,10 +29,15 @@ class _ResultScreenState extends State<ResultScreen> {
     try {
       final result = await TFLiteService().classifyImage(widget.imagePath);
       
+      if (result['is_sawit'] == false) {
+        throw ImageQualityException(result['error'] ?? 'Objek bukan buah sawit.');
+      }
+
       setState(() {
         _predictedClass = result['class'];
         _recommendation = result['recommendation'];
-        _confidence = double.tryParse(result['confidence'] ?? '0.0');
+        // TFLiteService sekarang mengembalikan string untuk confidence
+        _confidence = double.tryParse(result['confidence'].toString());
         _isLoading = false;
       });
 
@@ -52,13 +57,11 @@ class _ResultScreenState extends State<ResultScreen> {
         _errorMessage = e.message;
         _isLoading = false;
       });
-      _showErrorDialog(e.message);
     } catch (e) {
       setState(() {
         _errorMessage = 'Terjadi kesalahan saat memproses gambar: $e';
         _isLoading = false;
       });
-      _showErrorDialog(_errorMessage!);
     }
   }
 
@@ -68,7 +71,7 @@ class _ResultScreenState extends State<ResultScreen> {
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
-        title: const Text('Peringatan Kualitas Gambar'),
+        title: const Text('Peringatan Deteksi'),
         content: Text(message),
         actions: [
           TextButton(
@@ -115,95 +118,126 @@ class _ResultScreenState extends State<ResultScreen> {
                 ],
               ),
             )
-          : _errorMessage != null
-              ? const Center(child: Text('Gagal memproses gambar.'))
-              : SingleChildScrollView(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.file(
-                            File(widget.imagePath),
-                            height: 300,
-                            fit: BoxFit.cover,
+          : SingleChildScrollView(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.file(
+                        File(widget.imagePath),
+                        height: 300,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    
+                    if (_errorMessage != null) ...[
+                      // Tampilan jika ditolak oleh YOLO
+                      Card(
+                        color: Colors.red.shade50,
+                        elevation: 4,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          side: const BorderSide(color: Colors.red, width: 2),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(24.0),
+                          child: Column(
+                            children: [
+                              const Icon(Icons.warning_amber_rounded, color: Colors.red, size: 48),
+                              const SizedBox(height: 16),
+                              Text(
+                                _errorMessage!,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.red,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                        const SizedBox(height: 24),
-                        Card(
-                          elevation: 4,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(24.0),
-                            child: Column(
-                              children: [
-                                const Text(
-                                  'Hasil Klasifikasi',
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    color: Colors.grey,
-                                  ),
+                      ),
+                    ] else ...[
+                      // Tampilan jika berhasil (Sawit terdeteksi)
+                      Card(
+                        elevation: 4,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(24.0),
+                          child: Column(
+                            children: [
+                              const Text(
+                                'Hasil Klasifikasi',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  color: Colors.grey,
                                 ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  _predictedClass ?? '-',
-                                  style: TextStyle(
-                                    fontSize: 32,
-                                    fontWeight: FontWeight.bold,
-                                    color: _getClassColor(_predictedClass),
-                                  ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                _predictedClass ?? '-',
+                                style: TextStyle(
+                                  fontSize: 32,
+                                  fontWeight: FontWeight.bold,
+                                  color: _getClassColor(_predictedClass),
                                 ),
-                                if (_confidence != null)
-                                  Padding(
-                                    padding: const EdgeInsets.only(top: 8.0),
-                                    child: Text(
-                                      'Akurasi: ${(_confidence! * 100).toStringAsFixed(1)}%',
-                                      style: TextStyle(
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w600,
-                                        color: Colors.grey[700],
-                                      ),
+                              ),
+                              if (_confidence != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 8.0),
+                                  child: Text(
+                                    'Akurasi: ${(_confidence! * 100).toStringAsFixed(1)}%',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.grey[700],
                                     ),
                                   ),
-                                const Divider(height: 32, thickness: 1),
-                                const Text(
-                                  'Rekomendasi',
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    color: Colors.grey,
-                                  ),
                                 ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  _recommendation ?? '-',
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.w500,
-                                  ),
+                              const Divider(height: 32, thickness: 1),
+                              const Text(
+                                'Rekomendasi',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  color: Colors.grey,
                                 ),
-                              ],
-                            ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                _recommendation ?? '-',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                        const SizedBox(height: 24),
-                        ElevatedButton(
-                          onPressed: () {
-                            Navigator.pop(context);
-                          },
-                          style: ElevatedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(vertical: 16),
-                          ),
-                          child: const Text('Kembali ke Beranda', style: TextStyle(fontSize: 16)),
-                        ),
-                      ],
+                      ),
+                    ],
+                    
+                    const SizedBox(height: 24),
+                    ElevatedButton(
+                      onPressed: () {
+                        Navigator.pop(context);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                      ),
+                      child: const Text('Kembali ke Beranda', style: TextStyle(fontSize: 16)),
                     ),
-                  ),
+                  ],
                 ),
+              ),
+            ),
     );
   }
 }

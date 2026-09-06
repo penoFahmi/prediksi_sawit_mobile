@@ -1,4 +1,7 @@
+import 'dart:developer';
 import 'dart:io';
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:image/image.dart' as img;
 import 'package:tflite_flutter/tflite_flutter.dart';
 
@@ -14,100 +17,93 @@ class TFLiteService {
   factory TFLiteService() => _instance;
   TFLiteService._internal();
 
-  Interpreter? _interpreter;
-  bool _isModelLoaded = false;
+  Interpreter? _yoloInterpreter;
+  Interpreter? _classifierInterpreter;
 
-  // TensorFlow/Keras default class order is alphabetical based on folder names:
-  // 1. Lewat Matang
-  // 2. Matang
-  // 3. Mengkal
-  // 4. Mentah
   final List<String> _labels = ['Lewat Matang', 'Matang', 'Mengkal', 'Mentah'];
 
+  /// Cek apakah platform mendukung TFLite
+  bool get _isPlatformSupported {
+    if (kIsWeb) return false;
+    return Platform.isAndroid || Platform.isIOS;
+  }
+
   Future<void> loadModel() async {
+    if (!_isPlatformSupported) {
+      log("Platform tidak mendukung TFLite. Hanya Android & iOS.");
+      return;
+    }
     try {
-      _interpreter = await Interpreter.fromAsset('assets/models/model.tflite');
-      _isModelLoaded = true;
-      print('Model loaded successfully');
+      log("Memuat model YOLO dan MobileNet...");
+      _yoloInterpreter = await Interpreter.fromAsset('assets/models/yolov8_sawit.tflite');
+      _classifierInterpreter = await Interpreter.fromAsset('assets/models/mobilenetv2_sawit_v9_fp16.tflite');
+      log("Kedua Model berhasil dimuat!");
     } catch (e) {
-      print('Error loading model: $e');
-      _isModelLoaded = false;
+      log("Gagal memuat model: $e");
+      throw Exception("Gagal memuat model TFLite: $e");
     }
   }
 
-  Future<Map<String, String>> classifyImage(String imagePath) async {
-    // 1. Load image
-    final File imageFile = File(imagePath);
-    final bytes = await imageFile.readAsBytes();
-    final img.Image? decodedImage = img.decodeImage(bytes);
-
-    if (decodedImage == null) {
-      throw Exception('Failed to decode image');
+  /// Fungsi Utama Pipeline yang terhubung dengan ResultScreen
+  Future<Map<String, dynamic>> classifyImage(String imagePath) async {
+    // Guard: Platform tidak didukung
+    if (!_isPlatformSupported) {
+      return {
+        'is_sawit': false,
+        'error': 'Fitur deteksi AI hanya tersedia di Android & iOS.\nGunakan perangkat HP untuk menggunakan fitur ini.',
+      };
     }
 
-    // 2. Quality check (mock implementation for blur/darkness)
-    // A simple brightness check using luminance
-    double totalBrightness = 0;
-    for (final pixel in decodedImage) {
-      totalBrightness += (0.299 * pixel.r + 0.587 * pixel.g + 0.114 * pixel.b);
-    }
-    double avgBrightness = totalBrightness / (decodedImage.width * decodedImage.height);
-    
-    if (avgBrightness < 30) {
-      throw ImageQualityException('Foto terlalu gelap, silakan ambil ulang gambar');
+    if (_yoloInterpreter == null || _classifierInterpreter == null) {
+      await loadModel(); // Coba muat ulang jika masih null
     }
 
-    // 3. Inference (if model loaded, else mock)
-    if (!_isModelLoaded || _interpreter == null) {
-      throw Exception('Model AI gagal dimuat. Pastikan file model.tflite ada dan aplikasi telah di-restart sepenuhnya.');
-    }
-
-    // 4. Preprocess for MobileNetV2 (224x224, float32, normalized to [-1, 1] or [0, 1] depending on model)
-    // Assuming standard ImageNet normalization or [0, 1]
-    final img.Image resizedImage = img.copyResize(decodedImage, width: 224, height: 224);
-    
-    // Create input tensor [1, 224, 224, 3]
-    var input = List.generate(
-      1,
-      (i) => List.generate(
-        224,
-        (y) => List.generate(
-          224,
-          (x) {
-            final pixel = resizedImage.getPixel(x, y);
-            // Normalisasi [0.0 - 1.0] yang sering dipakai jika dilatih dengan rescale=1./255
-            return [
-              pixel.r / 255.0, // R
-              pixel.g / 255.0, // G
-              pixel.b / 255.0, // B
-            ];
-          },
-        ),
-      ),
-    );
-
-    // Create output tensor [1, 4] (4 classes)
-    var output = List.generate(1, (i) => List.filled(4, 0.0));
-
-    // Run inference
-    _interpreter!.run(input, output);
-
-    // Get max probability class
-    final probabilities = output[0];
-    int maxIndex = 0;
-    double maxProb = probabilities[0];
-    for (int i = 1; i < probabilities.length; i++) {
-      if (probabilities[i] > maxProb) {
-        maxProb = probabilities[i];
-        maxIndex = i;
+    try {
+      final File imageFile = File(imagePath);
+      final imageBytes = await imageFile.readAsBytes();
+      img.Image? originalImage = img.decodeImage(imageBytes);
+      
+      if (originalImage == null) {
+        throw Exception('Gagal membaca gambar');
       }
-    }
 
-    String predictedClass = _labels[maxIndex];
-    return _getRecommendation(predictedClass, maxProb);
+      // Tahap 1: Deteksi YOLO
+      final yoloResult = _runYoloInference(originalImage);
+      if (yoloResult == null || yoloResult['confidence'] < 0.25) {
+        return {
+          'error': 'Buah Sawit tidak terdeteksi secara jelas di foto ini.',
+          'is_sawit': false
+        };
+      }
+
+      // Tahap 2: Potong Gambar
+      int cropX = yoloResult['x'];
+      int cropY = yoloResult['y'];
+      int cropW = yoloResult['w'];
+      int cropH = yoloResult['h'];
+      
+      cropX = cropX.clamp(0, originalImage.width);
+      cropY = cropY.clamp(0, originalImage.height);
+      cropW = cropW.clamp(1, originalImage.width - cropX);
+      cropH = cropH.clamp(1, originalImage.height - cropY);
+
+      img.Image croppedImage = img.copyCrop(originalImage, x: cropX, y: cropY, width: cropW, height: cropH);
+
+      // Tahap 3: Klasifikasi Kematangan dengan MobileNetV2
+      final classificationResult = _runClassification(croppedImage);
+
+      String predictedClass = classificationResult['label'];
+      double confidence = classificationResult['confidence'];
+      
+      return _getRecommendation(predictedClass, confidence);
+      
+    } catch (e) {
+      log("Error processing pipeline: $e");
+      throw Exception('Terjadi kesalahan sistem saat memproses gambar');
+    }
   }
 
-  Map<String, String> _getRecommendation(String detectedClass, double confidence) {
+  Map<String, dynamic> _getRecommendation(String detectedClass, double confidence) {
     String recommendation = '';
     switch (detectedClass) {
       case 'Mentah':
@@ -126,13 +122,103 @@ class TFLiteService {
         recommendation = 'Kelas tidak dikenal';
     }
     return {
+      'is_sawit': true,
       'class': detectedClass,
       'recommendation': recommendation,
       'confidence': confidence.toString(),
     };
   }
-  
-  void dispose() {
-    _interpreter?.close();
+
+  /// Menjalankan YOLOv8 dengan Float32List
+  Map<String, dynamic>? _runYoloInference(img.Image image) {
+    img.Image resizedImage = img.copyResize(image, width: 640, height: 640);
+    
+    var inputFlat = Float32List(1 * 3 * 640 * 640);
+    int rOffset = 0;
+    int gOffset = 640 * 640;
+    int bOffset = 2 * 640 * 640;
+    int pixelIndex = 0;
+    
+    for (int y = 0; y < 640; y++) {
+      for (int x = 0; x < 640; x++) {
+        final pixel = resizedImage.getPixel(x, y);
+        inputFlat[rOffset + pixelIndex] = pixel.r / 255.0;
+        inputFlat[gOffset + pixelIndex] = pixel.g / 255.0;
+        inputFlat[bOffset + pixelIndex] = pixel.b / 255.0;
+        pixelIndex++;
+      }
+    }
+
+    var outputFlat = Float32List(1 * 5 * 8400);
+    _yoloInterpreter!.run(inputFlat.buffer, outputFlat.buffer);
+
+    double maxConfidence = 0;
+    int bestIndex = -1;
+
+    for (int i = 0; i < 8400; i++) {
+      double conf = outputFlat[4 * 8400 + i];
+      if (conf > maxConfidence) {
+        maxConfidence = conf;
+        bestIndex = i;
+      }
+    }
+
+    if (bestIndex == -1) return null;
+
+    double cx = outputFlat[0 * 8400 + bestIndex];
+    double cy = outputFlat[1 * 8400 + bestIndex];
+    double w = outputFlat[2 * 8400 + bestIndex];
+    double h = outputFlat[3 * 8400 + bestIndex];
+
+    double scaleX = image.width / 640.0;
+    double scaleY = image.height / 640.0;
+
+    int finalW = (w * scaleX).round();
+    int finalH = (h * scaleY).round();
+    int finalX = ((cx - (w / 2)) * scaleX).round();
+    int finalY = ((cy - (h / 2)) * scaleY).round();
+
+    return {
+      'confidence': maxConfidence,
+      'x': finalX,
+      'y': finalY,
+      'w': finalW,
+      'h': finalH
+    };
   }
-}
+
+  /// Menjalankan MobileNetV2 dengan Float32List
+  Map<String, dynamic> _runClassification(img.Image croppedImage) {
+    img.Image resizedImage = img.copyResize(croppedImage, width: 320, height: 320);
+
+    var inputFlat = Float32List(1 * 320 * 320 * 3);
+    int pIndex = 0;
+    
+    for (int y = 0; y < 320; y++) {
+      for (int x = 0; x < 320; x++) {
+        final pixel = resizedImage.getPixel(x, y);
+        // RGB Keras Normalization: [-1, 1]
+        inputFlat[pIndex++] = (pixel.r / 127.5) - 1.0;
+        inputFlat[pIndex++] = (pixel.g / 127.5) - 1.0;
+        inputFlat[pIndex++] = (pixel.b / 127.5) - 1.0;
+      }
+    }
+
+    var outputFlat = Float32List(4);
+    _classifierInterpreter!.run(inputFlat.buffer, outputFlat.buffer);
+
+    double maxProb = 0;
+    int maxIndex = -1;
+    for (int i = 0; i < 4; i++) {
+      if (outputFlat[i] > maxProb) {
+        maxProb = outputFlat[i];
+        maxIndex = i;
+      }
+    }
+
+    return {
+      'label': _labels[maxIndex],
+      'confidence': maxProb
+    };
+  }
+} 
